@@ -1,12 +1,13 @@
 package dev.kourier.amqp.channel
 
+import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
 class AMQPChannelsTest {
 
     @Test
-    fun testReservesChannelIds() {
+    fun testReservesChannelIds() = runTest {
         val channels = AMQPChannels(channelMax = 10u)
         val c1 = channels.reserveNext()
         val c2 = channels.reserveNext()
@@ -15,7 +16,7 @@ class AMQPChannelsTest {
     }
 
     @Test
-    fun testReusesChannelIdAfterRemoving() {
+    fun testReusesChannelIdAfterRemoving() = runTest {
         val channels = AMQPChannels(channelMax = 10u)
         val c1 = channels.reserveNext()
         channels.remove(id = c1!!)
@@ -25,7 +26,7 @@ class AMQPChannelsTest {
     }
 
     @Test
-    fun testDoesNotGoPastChannelMax() {
+    fun testDoesNotGoPastChannelMax() = runTest {
         val channels = AMQPChannels(channelMax = 1u)
         val c1 = channels.reserveNext()
         val c2 = channels.reserveNext()

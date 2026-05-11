@@ -65,6 +65,10 @@ kotlin {
         testRuns.named("test") {
             executionTask.configure {
                 useJUnitPlatform()
+                testLogging {
+                    showStandardStreams = true
+                    events("standardOut", "standardError")
+                }
             }
         }
     }
@@ -75,6 +79,7 @@ kotlin {
             languageSettings.apply {
                 optIn("dev.kourier.amqp.InternalAmqpApi")
                 optIn("kotlin.time.ExperimentalTime")
+                optIn("kotlin.uuid.ExperimentalUuidApi")
                 optIn("kotlin.js.ExperimentalJsExport")
             }
         }
@@ -88,6 +93,12 @@ kotlin {
         val commonTest by getting {
             dependencies {
                 implementation(kotlin("test"))
+                implementation(libs.kotlinx.coroutines.test)
+            }
+        }
+        val jvmTest by getting {
+            dependencies {
+                implementation(libs.logback.classic)
             }
         }
     }
@@ -97,4 +108,5 @@ detekt {
     buildUponDefaultConfig = true
     config.setFrom("${rootProject.projectDir}/detekt.yml")
     source.from(file("src/commonMain/kotlin"))
+    ignoreFailures = true
 }

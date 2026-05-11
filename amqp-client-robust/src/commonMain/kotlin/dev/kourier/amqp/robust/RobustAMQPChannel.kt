@@ -109,10 +109,17 @@ open class RobustAMQPChannel(
         }
     }
 
-    override suspend fun write(vararg frames: Frame) {
-        val channelRestoreContext = currentChannelRestoreContext()
-        if (channelRestoreContext == null) restoreCompleted.await() // Wait for restore to complete if not in the restore context
-        super.write(*frames)
+    override suspend fun prepareForWrite() {
+        // Wait for any in-progress restore before letting a user-initiated write proceed.
+        // Invoked by:
+        //   - writeAndWaitForResponse BEFORE writeMutex acquisition (the response-bearing
+        //     RPC path — doing the await inside the mutex would deadlock against restore's
+        //     own writes which need the same mutex).
+        //   - DefaultAMQPChannel.write(), so the no-response paths (basicPublish, basicAck,
+        //     basicNack, the cancel frame from produce's awaitClose) also wait for restore.
+        // Restore's own writes carry [ChannelRestoreContextElement] in the coroutine context
+        // and skip the await to avoid blocking the very restore we'd be waiting on.
+        if (currentChannelRestoreContext() == null) restoreCompleted.await()
     }
 
     override suspend fun cancelAll(channelClosed: AMQPException.ChannelClosed) {
@@ -277,7 +284,27 @@ open class RobustAMQPChannel(
                 onDelivery(adjustedDelivery)
             },
             onCanceled = { response ->
-                if (response is AMQPResponse.Channel.Closed && state == ConnectionState.OPEN) return@basicConsume
+                // Forward Channel.Closed to the user only on a terminal close (user-initiated
+                // channel.close() or terminal connection close). Transient broker/connection
+                // closes are restored — the consumer must not see a cancellation for those,
+                // otherwise its receive-channel would close and never reattach to the
+                // post-restore listener.
+                //
+                // The previous predicate `state == OPEN` was racy: prepareForRestore() flips
+                // state OPEN→CLOSED on the connectionFactory thread concurrently with the
+                // listener's read, so during reconnect the check could observe CLOSED and
+                // (incorrectly) forward — closing the user's ReceiveChannel mid-restore.
+                //
+                // Race-free signals (all monotonic, set synchronously by the originator):
+                //  - state == SHUTTING_DOWN: set by close() before sending the close frame.
+                //  - channelClosed.isCompleted: completed by cancelAll on user-init close.
+                //  - connection.connectionClosed.isCompleted: connection terminally closed.
+                if (response is AMQPResponse.Channel.Closed) {
+                    val terminal = state == ConnectionState.SHUTTING_DOWN
+                            || channelClosed.isCompleted
+                            || connection.connectionClosed.isCompleted
+                    if (!terminal) return@basicConsume
+                }
                 onCanceled(response)
             }
         ).also {

@@ -7,6 +7,7 @@ import dev.kourier.amqp.channel.AMQPChannel
 import io.ktor.utils.io.core.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
 import kotlin.test.*
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
@@ -28,11 +29,11 @@ class RobustAMQPChannelTest {
 
     @Test
     @OptIn(DelicateCoroutinesApi::class)
-    fun testDeclareAndRestoreEverything() = runBlocking {
+    fun testDeclareAndRestoreEverything() = runTest {
         withConnection { connection ->
             val channel = connection.openChannel()
-            val closeEvent = async { channel.closedResponses.first() }
-            val reopenEvent = async { channel.openedResponses.first() }
+            val closeEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.closedResponses.first() }
+            val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
 
             val queueName = "test-restore-queue"
             val exchange1 = "test-restore-exchange1"
@@ -102,11 +103,11 @@ class RobustAMQPChannelTest {
     }
 
     @Test
-    fun testGetQueueFail() = runBlocking {
+    fun testGetQueueFail() = runTest {
         withConnection { connection ->
             val channel = connection.openChannel()
-            val closeEvent = async { channel.closedResponses.first() }
-            val reopenEvent = async { channel.openedResponses.first() }
+            val closeEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.closedResponses.first() }
+            val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
 
             val name = "test-passive-queue-${Uuid.random()}"
             channel.queueDeclare(name, autoDelete = true, arguments = mapOf("x-max-length" to Field.Int(1)))
@@ -124,11 +125,11 @@ class RobustAMQPChannelTest {
     }
 
     @Test
-    fun testDeleteExchange() = runBlocking {
+    fun testDeleteExchange() = runTest {
         withConnection { connection ->
             val channel = connection.openChannel()
-            val closeEvent = async { channel.closedResponses.first() }
-            val reopenEvent = async { channel.openedResponses.first() }
+            val closeEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.closedResponses.first() }
+            val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
 
             channel.exchangeDeclare("test-delete-exchange", BuiltinExchangeType.DIRECT, durable = true)
             channel.exchangeDeclare("test-delete-exchange-2", BuiltinExchangeType.FANOUT, durable = true)
@@ -152,11 +153,11 @@ class RobustAMQPChannelTest {
     }
 
     @Test
-    fun testDeleteQueue() = runBlocking {
+    fun testDeleteQueue() = runTest {
         withConnection { connection ->
             val channel = connection.openChannel()
-            val closeEvent = async { channel.closedResponses.first() }
-            val reopenEvent = async { channel.openedResponses.first() }
+            val closeEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.closedResponses.first() }
+            val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
 
             channel.exchangeDeclare("test-delete-queue-exchange", BuiltinExchangeType.DIRECT, durable = true)
             channel.queueDeclare(
@@ -187,11 +188,11 @@ class RobustAMQPChannelTest {
 
     @Test
     @OptIn(DelicateCoroutinesApi::class)
-    fun testCancelConsume() = runBlocking {
+    fun testCancelConsume() = runTest {
         withConnection { connection ->
             val channel = connection.openChannel()
-            val closeEvent = async { channel.closedResponses.first() }
-            val reopenEvent = async { channel.openedResponses.first() }
+            val closeEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.closedResponses.first() }
+            val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
 
             val queueName = "test-cancel-consume-queue"
             channel.queueDeclare(
@@ -229,11 +230,11 @@ class RobustAMQPChannelTest {
      */
     @Test
     @OptIn(DelicateCoroutinesApi::class)
-    fun testRestoreMultipleBrokerAssignedConsumersAfterChannelBreak() = runBlocking {
+    fun testRestoreMultipleBrokerAssignedConsumersAfterChannelBreak() = runTest {
         withConnection { connection ->
             val channel = connection.openChannel()
-            val closeEvent = async { channel.closedResponses.first() }
-            val reopenEvent = async { channel.openedResponses.first() }
+            val closeEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.closedResponses.first() }
+            val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
 
             val queue1 = "test-multi-consumer-ch-${Uuid.random()}"
             val queue2 = "test-multi-consumer-ch-${Uuid.random()}"
@@ -279,11 +280,11 @@ class RobustAMQPChannelTest {
 
     @Test
     @OptIn(DelicateCoroutinesApi::class)
-    fun testConsumerTimeoutWithManualAck() = runBlocking {
+    fun testConsumerTimeoutWithManualAck() = runTest(timeout = 120.seconds) {
         withConnection { connection ->
             val channel = connection.openChannel()
-            val closeEvent = async { channel.closedResponses.first() }
-            val reopenEvent = async { channel.openedResponses.first() }
+            val closeEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.closedResponses.first() }
+            val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
 
             val queueName = "test-consumer-timeout-queue-${Uuid.random()}"
             val exchangeName = "test-consumer-timeout-exchange-${Uuid.random()}"
@@ -354,7 +355,7 @@ class RobustAMQPChannelTest {
 
     @Test
     @OptIn(DelicateCoroutinesApi::class)
-    fun testRestoreTopologyFalseDoesNotTrackResources() = runBlocking {
+    fun testRestoreTopologyFalseDoesNotTrackResources() = runTest {
         withConnection({ server { restoreTopology = false } }) { connection ->
             val channel = connection.openChannel() as RobustAMQPChannel
 
@@ -388,7 +389,7 @@ class RobustAMQPChannelTest {
 
     @Test
     @OptIn(DelicateCoroutinesApi::class)
-    fun testRestoreTopologyTrueTracksResources() = runBlocking {
+    fun testRestoreTopologyTrueTracksResources() = runTest {
         withConnection { connection ->
             val channel = connection.openChannel() as RobustAMQPChannel
 
@@ -420,11 +421,11 @@ class RobustAMQPChannelTest {
      */
     @Test
     @OptIn(DelicateCoroutinesApi::class)
-    fun testRestoreTopologyFalseConsumerStillRestored() = runBlocking {
+    fun testRestoreTopologyFalseConsumerStillRestored() = runTest {
         withConnection({ server { restoreTopology = false } }) { connection ->
             val channel = connection.openChannel()
-            val closeEvent = async { channel.closedResponses.first() }
-            val reopenEvent = async { channel.openedResponses.first() }
+            val closeEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.closedResponses.first() }
+            val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
 
             val queueName = "test-no-topo-restore-q-${Uuid.random()}"
             val exchangeName = "test-no-topo-restore-ex-${Uuid.random()}"
@@ -465,15 +466,15 @@ class RobustAMQPChannelTest {
      */
     @Test
     @OptIn(DelicateCoroutinesApi::class)
-    fun testRestoreTopologyFalseSkipsRedeclareOnRestore() = runBlocking {
+    fun testRestoreTopologyFalseSkipsRedeclareOnRestore() = runTest {
         val queueName = "test-skip-redeclare-q-${Uuid.random()}"
         val exchangeName = "test-skip-redeclare-ex-${Uuid.random()}"
 
         withConnection { external ->
             withConnection({ server { restoreTopology = false } }) { connection ->
                 val channel = connection.openChannel()
-                val closeEvent = async { channel.closedResponses.first() }
-                val reopenEvent = async { channel.openedResponses.first() }
+                val closeEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.closedResponses.first() }
+                val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
 
                 channel.exchangeDeclare(
                     exchangeName,
@@ -517,15 +518,15 @@ class RobustAMQPChannelTest {
      */
     @Test
     @OptIn(DelicateCoroutinesApi::class)
-    fun testRestoreTopologyTrueRedeclaresAfterExternalDelete() = runBlocking {
+    fun testRestoreTopologyTrueRedeclaresAfterExternalDelete() = runTest {
         val queueName = "test-redeclare-q-${Uuid.random()}"
         val exchangeName = "test-redeclare-ex-${Uuid.random()}"
 
         withConnection { external ->
             withConnection { connection ->
                 val channel = connection.openChannel()
-                val closeEvent = async { channel.closedResponses.first() }
-                val reopenEvent = async { channel.openedResponses.first() }
+                val closeEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.closedResponses.first() }
+                val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
 
                 channel.exchangeDeclare(
                     exchangeName,
@@ -544,6 +545,14 @@ class RobustAMQPChannelTest {
                 channel.closeByBreaking()
                 closeEvent.await()
                 reopenEvent.await()
+
+                // reopenEvent fires when restore's open() emits Channel.OpenOk — that's step 1
+                // of restore, before queueDeclare/exchangeDeclare redeclares. Any operation on
+                // this channel (RobustAMQPChannel) goes through write() which awaits
+                // restoreCompleted internally, so a throwaway no-op call synchronizes us with
+                // the rest of restore before we check via the external connection. basicQos
+                // can't trigger a re-restore the way a passive declare on a missing entity could.
+                channel.basicQos(count = 1u)
 
                 // Queue and exchange must exist — restore redeclared them from the tracking maps.
                 val checkChannel = external.openChannel()
@@ -571,10 +580,10 @@ class RobustAMQPChannelTest {
      */
     @Test
     @OptIn(DelicateCoroutinesApi::class)
-    fun testAckAfterRestoreWithRepeatingDeliveryTag() = runBlocking {
+    fun testAckAfterRestoreWithRepeatingDeliveryTag() = runTest(timeout = 120.seconds) {
         withConnection { connection ->
             val channel = connection.openChannel()
-            val reopenEvent = async { channel.openedResponses.first() }
+            val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
 
             val queueName = "test-repeating-tag-queue-${Uuid.random()}"
             val exchangeName = "test-repeating-tag-exchange-${Uuid.random()}"

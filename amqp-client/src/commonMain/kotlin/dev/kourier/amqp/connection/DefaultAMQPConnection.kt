@@ -13,14 +13,12 @@ import io.ktor.util.logging.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.filterIsInstance
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.io.IOException
 import kotlinx.serialization.encodeToByteArray
+import kotlin.concurrent.Volatile
 import kotlin.time.Duration.Companion.seconds
 
 open class DefaultAMQPConnection(
@@ -52,6 +50,7 @@ open class DefaultAMQPConnection(
 
     protected val logger = KtorSimpleLogger("AMQPConnection")
 
+    @Volatile
     override var state = ConnectionState.CLOSED
 
     protected var socket: Socket? = null
@@ -62,7 +61,15 @@ open class DefaultAMQPConnection(
     protected var heartbeatSubscription: Job? = null
 
     private val writeMutex = Mutex()
-    private var writeBlockSignal: CompletableDeferred<Unit>? = null
+
+    // Source of truth for the broker-imposed write block. Reads via writeBlocked.first { !it }
+    // before each non-heartbeat write, eliminating the prior CompletableDeferred field-clearing race.
+    @InternalAmqpApi
+    val writeBlocked = MutableStateFlow(false)
+
+    // Serializes close-from-failure transitions so concurrent IO errors / decoder exceptions
+    // don't double-fire the SHUTTING_DOWN -> CLOSED path; the gate inside is "skip if terminal".
+    private val closeMutex = Mutex()
 
     private var channelMax: UShort = 0u
     private var frameMax: UInt = 0u
@@ -113,9 +120,16 @@ open class DefaultAMQPConnection(
 
         startListening()
 
-        write(Protocol.PROTOCOL_START_0_9_1)
+        // Subscribe BEFORE writing the protocol header: `connectionResponses` is a SharedFlow
+        // with replay=0, so a fast Connection.Start/Tune-Ok handshake could emit the
+        // Connected response before our subscription is wired up under multi-thread dispatch.
+        // `onSubscription` must be applied directly to the SharedFlow (it isn't defined for
+        // plain Flow), so attach it first and filter afterwards.
         val response = withTimeout(config.server.timeout.inWholeMilliseconds) {
-            connectionResponses.filterIsInstance<AMQPResponse.Connection.Connected>().first()
+            connectionResponses
+                .onSubscription { write(Protocol.PROTOCOL_START_0_9_1) }
+                .filterIsInstance<AMQPResponse.Connection.Connected>()
+                .first()
         }
 
         this.channelMax = response.channelMax
@@ -143,6 +157,13 @@ open class DefaultAMQPConnection(
         heartbeatSubscription = messageListeningScope.launch {
             while (isActive) {
                 delay(heartbeat.toInt().seconds.inWholeMilliseconds / 2)
+                // Skip the periodic heartbeat once the connection has begun shutting down.
+                // close() cancels this job before sending Connection.Close, but a tick that has
+                // already passed `delay` would otherwise still call sendHeartbeat() and push a
+                // frame onto the wire after Close — the broker treats that as `unexpected_frame:
+                // "type 8"`, floods its logs, and can spike latency for unrelated in-flight ops.
+                // The state check here keeps the public sendHeartbeat() API throw-on-closed.
+                if (state != ConnectionState.OPEN) continue
                 sendHeartbeat()
             }
         }
@@ -233,14 +254,13 @@ open class DefaultAMQPConnection(
 
             is Frame.Method.Connection.Blocked -> {
                 logger.debug("Connection blocked by broker: ${payload.reason}")
-                writeBlockSignal = CompletableDeferred()
+                writeBlocked.value = true
                 connectionResponses.emit(AMQPResponse.Connection.Blocked(payload.reason))
             }
 
             is Frame.Method.Connection.Unblocked -> {
                 logger.debug("Connection unblocked by broker")
-                writeBlockSignal?.complete(Unit)
-                writeBlockSignal = null
+                writeBlocked.value = false
                 connectionResponses.emit(AMQPResponse.Connection.Unblocked)
             }
 
@@ -251,28 +271,38 @@ open class DefaultAMQPConnection(
                 )
             )
 
-            is Frame.Method.Channel.Close -> channel?.let { channel ->
-                val exception = AMQPException.ChannelClosed(
-                    replyCode = payload.replyCode,
-                    replyText = payload.replyText,
-                    isInitiatedByApplication = false
-                )
-                channel.channelResponses.emit(
-                    AMQPResponse.Channel.Closed(
-                        channelId = frame.channelId,
-                        replyCode = payload.replyCode,
-                        replyText = payload.replyText,
-                    )
-                )
-                if (channel.shouldRemoveOnBrokerClose()) channels.remove(channel.id)
+            is Frame.Method.Channel.Close -> {
+                // ALWAYS send Channel.CloseOk back, even if we don't track this channel id.
+                // Per AMQP 0-9-1 spec section 1.4.2.6, CloseOk confirms a Close and tells the
+                // peer it can release resources. If we silently drop a Close for an unknown
+                // channel id, the broker keeps the id in "awaiting CloseOk" state and rejects
+                // any subsequent Channel.Open on that id with "second 'channel.open' seen"
+                // (CHANNEL_ERROR 504). This affects scenarios where a client-side error
+                // triggers a broker-side channel error on an id we never opened, e.g. sending
+                // an invalid frame referencing an unopened channel.
                 val closeOk = Frame(
                     channelId = frame.channelId,
                     payload = Frame.Method.Channel.CloseOk
                 )
                 write(closeOk)
-                // Trigger restoration asynchronously (for RobustAMQPChannel, this will restore)
-                messageListeningScope.launch {
-                    channel.cancelAll(exception)
+                channel?.let { channel ->
+                    val exception = AMQPException.ChannelClosed(
+                        replyCode = payload.replyCode,
+                        replyText = payload.replyText,
+                        isInitiatedByApplication = false
+                    )
+                    channel.channelResponses.emit(
+                        AMQPResponse.Channel.Closed(
+                            channelId = frame.channelId,
+                            replyCode = payload.replyCode,
+                            replyText = payload.replyText,
+                        )
+                    )
+                    if (channel.shouldRemoveOnBrokerClose()) channels.remove(channel.id)
+                    // Trigger restoration asynchronously (for RobustAMQPChannel, this will restore)
+                    messageListeningScope.launch {
+                        channel.cancelAll(exception)
+                    }
                 }
             }
 
@@ -466,7 +496,11 @@ open class DefaultAMQPConnection(
     @InternalAmqpApi
     override suspend fun write(vararg frames: Frame) {
         val isHeartbeatOnly = frames.all { it.payload is Frame.Heartbeat }
-        if (!isHeartbeatOnly) writeBlockSignal?.await()
+        if (!isHeartbeatOnly && writeBlocked.value) {
+            // Only subscribe (allocates a Flow collector) if we actually need to wait;
+            // unblocking the fast path matters here because every frame goes through it.
+            writeBlocked.first { !it }
+        }
         writeMutex.withLock { // Ensure that all frames are sent in order, without any other writes in between
             if (connectionClosed.isCompleted) throw connectionClosed.await()
             frames.forEach { frame ->
@@ -478,8 +512,14 @@ open class DefaultAMQPConnection(
 
     @InternalAmqpApi
     suspend inline fun <reified T : AMQPResponse> writeAndWaitForResponse(vararg frames: Frame): T {
-        write(*frames)
-        return connectionResponses.filterIsInstance<T>().first()
+        // Subscribe BEFORE writing: `connectionResponses` is a SharedFlow with replay=0,
+        // so any response emitted before our subscription would be lost. `onSubscription`
+        // must be applied directly to the SharedFlow (it isn't defined for plain Flow);
+        // it fires the write only after the subscription is fully wired up.
+        return connectionResponses
+            .onSubscription { write(*frames) }
+            .filterIsInstance<T>()
+            .first()
     }
 
     protected open fun createChannel(id: ChannelId, frameMax: UInt): AMQPChannel =
@@ -500,6 +540,16 @@ open class DefaultAMQPConnection(
     ): AMQPResponse.Connection.Closed {
         if (state != ConnectionState.OPEN) return AMQPResponse.Connection.Closed
         this.state = ConnectionState.SHUTTING_DOWN
+        // Stop the heartbeat ticker before sending Connection.Close: once the broker has processed
+        // Close it considers the connection terminal and treats any subsequent heartbeat frame as
+        // an `unexpected_frame: "type 8"` connection-level exception. That race floods the broker
+        // logs with spurious errors and, more importantly, can spike broker latency enough to make
+        // unrelated in-flight ops (like a concurrent channel restore) hit their timeout.
+        // cancelAndJoin (not just cancel) so any in-flight sendHeartbeat() completes before we
+        // start writing the Close frame — otherwise a heartbeat already past its state check
+        // would still slip onto the wire after Close.
+        heartbeatSubscription?.cancelAndJoin()
+        heartbeatSubscription = null
         val close = Frame(
             channelId = 0u,
             payload = Frame.Method.Connection.Close(
@@ -552,16 +602,24 @@ open class DefaultAMQPConnection(
     }
 
     protected open suspend fun closeFromChannelException(exception: Exception) {
-        if (state != ConnectionState.OPEN) return
-        // Same as if the server closed the connection properly
-        closeFromBroker(
-            Frame.Method.Connection.Close(
-                replyCode = 500u,
-                replyText = exception.message ?: "Channel is closed",
-                failingClassId = 0u,
-                failingMethodId = 0u,
+        // Serialize transition so two concurrent IO failures (read loop + writer) can't both
+        // pass the OPEN gate and double-fire closeFromBroker. The gate stays "only drive
+        // cleanup if currently OPEN" — non-OPEN means another caller (close(), the broker's
+        // explicit Connection.Close, or the robust subclass's broker-close path) is already
+        // handling it; double-firing here would re-enter closeFromBroker against a half-torn
+        // connection, which in robust mode would advance the reconnect loop twice.
+        closeMutex.withLock {
+            if (state != ConnectionState.OPEN) return
+            // Same as if the server closed the connection properly
+            closeFromBroker(
+                Frame.Method.Connection.Close(
+                    replyCode = 500u,
+                    replyText = exception.message ?: "Channel is closed",
+                    failingClassId = 0u,
+                    failingMethodId = 0u,
+                )
             )
-        )
+        }
     }
 
 }
