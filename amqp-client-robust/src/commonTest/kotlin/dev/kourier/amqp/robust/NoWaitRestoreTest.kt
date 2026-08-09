@@ -61,6 +61,56 @@ class NoWaitRestoreTest {
     }
 
     @Test
+    fun testNoWaitExchangeBindingsAreRecordedForRestore() = runTest {
+        withConnection({ server { restoreTopology = true } }) { connection ->
+            val channel = connection.openChannel() as RobustAMQPChannel
+            val source = "test-nowait-bound-source-${Uuid.random()}"
+            val destination = "test-nowait-bound-destination-${Uuid.random()}"
+
+            channel.exchangeDeclareNoWait(source, BuiltinExchangeType.DIRECT)
+            channel.exchangeDeclareNoWait(destination, BuiltinExchangeType.DIRECT)
+            channel.exchangeBindNoWait(destination, source, "bound.key")
+
+            assertTrue(
+                Triple(destination, source, "bound.key") in channel.boundExchanges,
+                "exchange binding not recorded for restore"
+            )
+
+            channel.exchangeUnbindNoWait(destination, source, "bound.key")
+            assertTrue(
+                Triple(destination, source, "bound.key") !in channel.boundExchanges,
+                "unbound exchange still recorded for restore"
+            )
+
+            channel.exchangeDelete(source)
+            channel.exchangeDelete(destination)
+            channel.close()
+        }
+    }
+
+    @Test
+    @OptIn(DelicateCoroutinesApi::class)
+    fun testConfirmModeSelectedWithNoWaitIsReestablishedAfterRestore() = runTest {
+        withConnection({ server { restoreTopology = false } }) { connection ->
+            val channel = connection.openChannel()
+
+            channel.confirmSelectNoWait()
+
+            val reopenEvent = async(start = CoroutineStart.UNDISPATCHED) { channel.openedResponses.first() }
+            channel.closeByBreaking()
+            reopenEvent.await()
+
+            // The reopened broker channel is not in confirm mode unless the restore re-issued the
+            // select, which only happens if the no-wait variant recorded the intent.
+            val confirm = async(start = CoroutineStart.UNDISPATCHED) { channel.publishConfirmResponses.first() }
+            channel.basicPublish("after restore".toByteArray(), "", "test-nowait-confirm-${Uuid.random()}")
+            withTimeout(5.seconds) { confirm.await() }
+
+            channel.close()
+        }
+    }
+
+    @Test
     @OptIn(DelicateCoroutinesApi::class)
     fun testTopologyDeclaredWithNoWaitSurvivesABrokerClose() = runTest {
         withConnection({ server { restoreTopology = true } }) { connection ->

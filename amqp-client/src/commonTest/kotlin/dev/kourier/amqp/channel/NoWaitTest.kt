@@ -120,6 +120,65 @@ class NoWaitTest {
     }
 
     @Test
+    fun testQueueDeclarePassiveNoWaitAssertsExistence() = runTest {
+        withConnection { connection ->
+            val channel = connection.openChannel()
+            val queue = "test-nowait-passive-queue-${Uuid.random()}"
+
+            channel.queueDeclare(queue, durable = false, exclusive = true, autoDelete = true)
+            channel.queueDeclarePassiveNoWait(queue)
+
+            // The assertion held, so the channel is still alive and usable.
+            assertEquals(queue, channel.queueDeclarePassive(queue).queueName)
+
+            channel.close()
+        }
+    }
+
+    @Test
+    fun testQueueDeclarePassiveNoWaitClosesTheChannelWhenTheQueueIsMissing() = runTest {
+        withConnection { connection ->
+            val channel = connection.openChannel()
+
+            channel.queueDeclarePassiveNoWait("test-nowait-absent-${Uuid.random()}")
+
+            // Nothing is returned, so the failed assertion reaches us only as the broker closing the
+            // channel. Awaiting that signal is deterministic, unlike issuing another call and hoping
+            // it is rejected rather than left waiting for a reply that will never come.
+            val closed = withTimeout(5.seconds) { channel.channelClosed.await() }
+            assertEquals(404u.toUShort(), closed.replyCode)
+        }
+    }
+
+    @Test
+    fun testExchangeDeclarePassiveNoWaitAssertsExistence() = runTest {
+        withConnection { connection ->
+            val channel = connection.openChannel()
+            val exchange = "test-nowait-passive-exchange-${Uuid.random()}"
+
+            channel.exchangeDeclare(exchange, BuiltinExchangeType.DIRECT)
+            channel.exchangeDeclarePassiveNoWait(exchange)
+
+            channel.exchangeDeclarePassive(exchange)
+
+            channel.exchangeDelete(exchange)
+            channel.close()
+        }
+    }
+
+    @Test
+    fun testExchangeDeclarePassiveNoWaitClosesTheChannelWhenTheExchangeIsMissing() = runTest {
+        withConnection { connection ->
+            val channel = connection.openChannel()
+
+            channel.exchangeDeclarePassiveNoWait("test-nowait-absent-${Uuid.random()}")
+
+            val closed = withTimeout(5.seconds) { channel.channelClosed.await() }
+            assertEquals(404u.toUShort(), closed.replyCode)
+        }
+    }
+
+    @Test
     fun testExchangeBindAndUnbindNoWait() = runTest {
         withConnection { connection ->
             val channel = connection.openChannel()
